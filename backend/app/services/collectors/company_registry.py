@@ -1,5 +1,77 @@
 TARGET_COMPANIES = [
     {
+        "name": "Ramp",
+        "source": "ashby",
+        "board_token": "ramp",
+        "category": "fintech_risk",
+    },
+    {
+        "name": "SentiLink",
+        "source": "ashby",
+        "board_token": "sentilink",
+        "category": "fintech_risk",
+    },
+    {
+        "name": "Cardless",
+        "source": "ashby",
+        "board_token": "cardless",
+        "category": "fintech_risk",
+    },
+    {
+        "name": "Two Dots",
+        "source": "ashby",
+        "board_token": "two-dots",
+        "category": "fintech_risk",
+    },
+    {
+        "name": "Numeral",
+        "source": "ashby",
+        "board_token": "numeral",
+        "category": "fintech",
+    },
+    {
+        "name": "Sapiom",
+        "source": "ashby",
+        "board_token": "sapiom",
+        "category": "ai_fintech",
+    },
+    {
+        "name": "Quora",
+        "source": "ashby",
+        "board_token": "quora",
+        "category": "ai",
+    },
+    {
+        "name": "Netic",
+        "source": "ashby",
+        "board_token": "netic",
+        "category": "ai",
+    },
+    {
+        "name": "Foxglove",
+        "source": "ashby",
+        "board_token": "foxglove",
+        "category": "data_ai",
+    },
+    {
+        "name": "Genmo",
+        "source": "ashby",
+        "board_token": "genmo",
+        "category": "ai",
+    },
+    {
+        "name": "Harvey",
+        "source": "ashby",
+        "board_token": "harvey",
+        "category": "ai",
+    },
+    {
+        "name": "Dave",
+        "source": "ashby",
+        "board_token": "dave",
+        "category": "fintech",
+    },
+    {
         "name": "Stripe",
         "source": "greenhouse",
         "board_token": "stripe",

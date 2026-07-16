@@ -4,7 +4,7 @@ import json
 
 from app.db.init_db import init_db
 from app.db.session import SessionLocal
-from app.services.collection_runs import execute_collection_run
+from app.services.collection_runs import CollectionRunConflict, execute_collection_run
 from app.services.collectors.company_registry import TARGET_COMPANIES
 from app.services.deduplication import deduplicate_jobs
 
@@ -32,17 +32,22 @@ def parse_args() -> argparse.Namespace:
 async def sync_sources(sources: list[str], max_jobs_per_board: int) -> int:
     runs = []
     summaries = []
+    conflicts = []
     with SessionLocal() as db:
         for source in sources:
-            run = await execute_collection_run(
-                db,
-                source=source,
-                max_jobs_per_board=max_jobs_per_board,
-                trigger="scheduled",
-            )
+            try:
+                run = await execute_collection_run(
+                    db,
+                    source=source,
+                    max_jobs_per_board=max_jobs_per_board,
+                    trigger="scheduled",
+                )
+            except CollectionRunConflict as exc:
+                run = exc.active_run
+                conflicts.append(source)
             runs.append(run)
 
-        if any(run.status == "success" for run in runs):
+        if any(run.status in {"success", "partial_success"} for run in runs):
             deduplicate_jobs(db)
 
         summaries = [
@@ -55,11 +60,17 @@ async def sync_sources(sources: list[str], max_jobs_per_board: int) -> int:
                 "updated": run.updated,
                 "reactivated": run.reactivated,
                 "closed": run.closed,
+                "failed_boards": len(
+                    [board for board in run.board_runs if board.status == "failed"]
+                ),
                 "error": run.error_message,
+                "conflict": run.source in conflicts,
             }
             for run in runs
         ]
-        has_failures = any(run.status == "failed" for run in runs)
+        has_failures = bool(conflicts) or any(
+            run.status in {"failed", "partial_success"} for run in runs
+        )
 
     print(json.dumps(summaries, indent=2))
     return 1 if has_failures else 0

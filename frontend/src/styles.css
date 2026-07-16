@@ -38,12 +38,23 @@ body {
 }
 
 .app-nav button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
   min-height: 38px;
   padding: 0 14px;
   border: 1px solid transparent;
   background: transparent;
   color: #64748b;
   white-space: nowrap;
+}
+
+.app-nav button svg {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
+  stroke-width: 1.9;
 }
 
 .app-nav button:hover,
@@ -249,6 +260,11 @@ h1 {
   color: #17623a;
 }
 
+.run-status.partial_success {
+  background: #fff7df;
+  color: #805b12;
+}
+
 .run-status.failed {
   background: #fff1f0;
   color: #9f2f29;
@@ -261,6 +277,47 @@ h1 {
 
 .collection-error {
   max-width: 280px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.board-run-details {
+  min-width: 150px;
+}
+
+.board-run-details summary {
+  cursor: pointer;
+  color: #1f6f8b;
+  font-weight: 800;
+}
+
+.board-run-list {
+  display: grid;
+  gap: 8px;
+  width: 420px;
+  max-height: 260px;
+  margin-top: 10px;
+  overflow-y: auto;
+}
+
+.board-run-item {
+  display: grid;
+  grid-template-columns: 72px minmax(110px, 1fr) 70px minmax(0, 1.4fr);
+  align-items: center;
+  gap: 8px;
+  padding: 7px 8px;
+  border: 1px solid #e5eaf0;
+  border-radius: 6px;
+  background: #ffffff;
+  font-size: 12px;
+}
+
+.board-run-item .run-status {
+  justify-content: center;
+}
+
+.board-run-item > span:last-child {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -941,6 +998,41 @@ button:disabled {
   max-height: 760px;
   overflow-y: auto;
   padding: 16px;
+}
+
+.job-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  min-height: 58px;
+  padding: 10px 16px;
+  border-top: 1px solid #e5eaf0;
+  color: #475569;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.job-pagination .icon-button {
+  width: 36px;
+  min-width: 36px;
+  height: 36px;
+  padding: 0;
+  border: 1px solid #cbd5e1;
+  background: #ffffff;
+  color: #334155;
+}
+
+.job-pagination .icon-button svg {
+  width: 18px;
+  height: 18px;
+}
+
+.job-pagination select {
+  width: auto;
+  min-width: 108px;
+  height: 36px;
+  padding: 0 30px 0 10px;
 }
 
 .job-card {

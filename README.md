@@ -62,9 +62,29 @@ curl -X POST http://127.0.0.1:8000/jobs/collect \
   }'
 ```
 
+### Collect Ashby Jobs
+
+Ashby's public Job Postings API is also supported. The built-in registry focuses on
+US data, risk, fintech, and AI employers such as Ramp, SentiLink, Cardless, Quora,
+and Netic.
+
+```bash
+curl -X POST http://127.0.0.1:8000/jobs/collect \
+  -H "Content-Type: application/json" \
+  -d '{
+    "source": "ashby",
+    "board_tokens": ["ramp", "sentilink"],
+    "max_jobs_per_board": 100
+  }'
+```
+
+Ashby collection keeps only listed public postings and stores primary and secondary
+locations, workplace type, description, publication date, apply URL, and raw
+compensation data when available.
+
 ### Sync All Sources
 
-Run all configured Greenhouse and Lever sources from the Data Sources page or API:
+Run all configured Ashby, Greenhouse, and Lever sources from the Data Sources page or API:
 
 ```bash
 curl -X POST http://127.0.0.1:8000/jobs/sync-all \
@@ -97,6 +117,29 @@ Example daily cron entry for 7:00 AM, using absolute paths:
 
 The command exits nonzero when any source fails, while preserving successful source runs
 and detailed failure records in `collection_runs`.
+
+Each company board also creates a `collection_board_runs` record. A failed board no
+longer discards jobs fetched from successful boards in the same source run:
+
+- `success`: every requested board completed.
+- `partial_success`: at least one board completed and at least one failed.
+- `failed`: no requested board completed successfully.
+
+Board token, company, fetched count, reconciliation eligibility, and error details are
+available by expanding the Boards cell in Data Sources collection history. Scheduled
+commands return a nonzero exit code for both failed and partially successful runs so the
+failure remains visible to monitoring.
+
+### Collection Concurrency and Recovery
+
+- Only one `running` collection is allowed per source at the database level.
+- UI, API, and scheduled CLI runs share the same concurrency constraint.
+- Each completed company board updates `heartbeat_at` and `boards_completed`.
+- A run without a heartbeat for more than 10 minutes is marked failed automatically.
+- A timed-out process cannot later commit stale job results.
+- The Data Sources page refreshes collection progress every 15 seconds and disables
+  actions that would conflict with a running source.
+- A single-source conflict returns HTTP `409`; Sync All skips sources already running.
 
 You can optionally pass `board_tokens` if you want to collect from specific Greenhouse boards:
 
@@ -155,8 +198,17 @@ public market dashboard and deduplication statistics.
 Filter saved jobs:
 
 ```bash
-curl "http://127.0.0.1:8000/jobs?company=stripe&search=analytics&limit=20"
+curl "http://127.0.0.1:8000/jobs?company=stripe&search=analytics&page=1&page_size=25"
 ```
+
+`GET /jobs` returns a paginated object with `items`, `total`, `page`,
+`page_size`, and `total_pages`. The legacy `limit` query parameter is still
+accepted as a page-size override.
+
+Fit Scores are cached in `job_fit_scores` by user, profile contents, job
+contents, and scoring version. Repeated list/detail requests reuse the cached
+result; changing profile skills, target roles/locations, or job content causes
+the score to be recalculated.
 
 Jobs are active-only by default. Include closed jobs when reviewing history:
 

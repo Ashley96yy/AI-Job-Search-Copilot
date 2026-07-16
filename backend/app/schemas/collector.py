@@ -13,6 +13,7 @@ class CollectJobsRequest(BaseModel):
 
 class CollectJobsResponse(BaseModel):
     source: str
+    status: str = "success"
     boards_requested: int
     fetched: int
     matched: int
@@ -22,10 +23,25 @@ class CollectJobsResponse(BaseModel):
     boards_reconciled: int = 0
     missing_observations: int = 0
     closed: int = 0
+    failed_boards: list[str] = Field(default_factory=list)
 
 
 class SyncAllJobsRequest(BaseModel):
     max_jobs_per_board: int = Field(default=100, ge=1, le=250)
+
+
+class CollectionBoardRunRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    board_token: str
+    company_name: str
+    status: str
+    started_at: datetime
+    completed_at: datetime
+    fetched: int = 0
+    can_reconcile: bool = False
+    error_message: Optional[str] = None
 
 
 class CollectionRunRead(BaseModel):
@@ -36,6 +52,7 @@ class CollectionRunRead(BaseModel):
     trigger: str
     status: str
     started_at: datetime
+    heartbeat_at: datetime
     completed_at: Optional[datetime] = None
     boards_requested: int = 0
     boards_completed: int = 0
@@ -47,6 +64,7 @@ class CollectionRunRead(BaseModel):
     missing_observations: int = 0
     closed: int = 0
     error_message: Optional[str] = None
+    board_runs: list[CollectionBoardRunRead] = Field(default_factory=list)
 
 
 class CompanySource(BaseModel):

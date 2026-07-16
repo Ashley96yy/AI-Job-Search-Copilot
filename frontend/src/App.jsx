@@ -1,15 +1,26 @@
 import { useEffect, useMemo, useState } from "react";
+import {
+  BriefcaseBusiness,
+  ChartColumn,
+  ChevronLeft,
+  ChevronRight,
+  ClipboardCheck,
+  Database,
+  FileText,
+  LayoutDashboard,
+  UserRound,
+} from "lucide-react";
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:8000";
 
 const NAV_ITEMS = [
-  { id: "dashboard", label: "Dashboard" },
-  { id: "jobs", label: "Jobs" },
-  { id: "profile", label: "Profile" },
-  { id: "documents", label: "Documents" },
-  { id: "skill_gaps", label: "Skill Gaps" },
-  { id: "tracker", label: "Tracker" },
-  { id: "data_sources", label: "Data Sources" },
+  { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
+  { id: "jobs", label: "Jobs", icon: BriefcaseBusiness },
+  { id: "profile", label: "Profile", icon: UserRound },
+  { id: "documents", label: "Documents", icon: FileText },
+  { id: "skill_gaps", label: "Skill Gaps", icon: ChartColumn },
+  { id: "tracker", label: "Tracker", icon: ClipboardCheck },
+  { id: "data_sources", label: "Data Sources", icon: Database },
 ];
 
 const APPLICATION_STATUS_OPTIONS = [
@@ -24,6 +35,7 @@ const APPLICATION_STATUS_OPTIONS = [
 
 const LABELS = {
   ai_ml: "AI / ML",
+  ashby: "Ashby",
   analytics_adjacent: "Analytics Adjacent",
   data_analytics: "Data Analytics",
   data_engineering: "Data Engineering",
@@ -44,6 +56,7 @@ const LABELS = {
   onsite: "Onsite",
   entry_friendly: "Entry Friendly",
   possible_stretch: "Possible Stretch",
+  partial_success: "Partial Success",
   too_senior: "Too Senior",
   product: "Product",
   remote: "Remote",
@@ -90,13 +103,15 @@ function formatDateTime(value) {
 }
 
 function formatDuration(startedAt, completedAt) {
-  if (!startedAt || !completedAt) {
+  if (!startedAt) {
     return "-";
   }
 
   const seconds = Math.max(
     0,
-    Math.round((new Date(completedAt) - new Date(startedAt)) / 1000),
+    Math.round(
+      (new Date(completedAt || Date.now()) - new Date(startedAt)) / 1000,
+    ),
   );
   if (seconds < 60) {
     return `${seconds}s`;
@@ -200,6 +215,12 @@ function App() {
   const [sources, setSources] = useState([]);
   const [collectionRuns, setCollectionRuns] = useState([]);
   const [jobs, setJobs] = useState([]);
+  const [jobPagination, setJobPagination] = useState({
+    total: 0,
+    page: 1,
+    page_size: 25,
+    total_pages: 0,
+  });
   const [selectedJob, setSelectedJob] = useState(null);
   const [showManualJobForm, setShowManualJobForm] = useState(false);
   const [manualJobForm, setManualJobForm] = useState({
@@ -306,6 +327,16 @@ function App() {
     return sources.filter((source) => source.source === collectorSource);
   }, [collectorSource, sources]);
 
+  const runningCollectionSources = useMemo(() => {
+    return new Set(
+      collectionRuns
+        .filter((run) => run.status === "running")
+        .map((run) => run.source),
+    );
+  }, [collectionRuns]);
+
+  const hasRunningCollection = runningCollectionSources.size > 0;
+
   const filteredApplications = useMemo(() => {
     if (!trackerStatusFilter) {
       return trackedApplications;
@@ -318,7 +349,7 @@ function App() {
     return new Set(trackedApplications.map((application) => application.raw_job_id));
   }, [trackedApplications]);
 
-  async function loadJobs() {
+  async function loadJobs(requestedPage = 1, requestedPageSize = jobPagination.page_size) {
     setLoadingJobs(true);
     setError("");
 
@@ -342,7 +373,8 @@ function App() {
     if (hasFitScore) params.set("has_fit_score", "true");
     if (maxPostingAgeDays) params.set("max_posting_age_days", maxPostingAgeDays);
     if (freshness) params.set("freshness", freshness);
-    params.set("limit", "100");
+    params.set("page", String(requestedPage));
+    params.set("page_size", String(requestedPageSize));
 
     try {
       const response = await fetch(`${API_BASE_URL}/jobs?${params.toString()}`);
@@ -351,7 +383,14 @@ function App() {
         throw new Error(`GET /jobs failed with ${response.status}`);
       }
 
-      setJobs(await response.json());
+      const result = await response.json();
+      setJobs(result.items);
+      setJobPagination({
+        total: result.total,
+        page: result.page,
+        page_size: result.page_size,
+        total_pages: result.total_pages,
+      });
       setSelectedJob(null);
     } catch (err) {
       setError(err.message);
@@ -1273,8 +1312,11 @@ function App() {
       }
 
       const result = await response.json();
+      const failedBoardMessage = result.failed_boards.length
+        ? ` Failed boards: ${result.failed_boards.join(", ")}.`
+        : "";
       setStatus(
-        `Collected ${result.boards_requested} boards. Fetched ${result.fetched}. Inserted ${result.inserted}. Updated ${result.updated}. Reactivated ${result.reactivated}. Closed ${result.closed}. Reconciled ${result.boards_reconciled} complete boards.`,
+        `Collection ${formatLabel(result.status)}. Processed ${result.boards_requested} boards. Fetched ${result.fetched}. Inserted ${result.inserted}. Updated ${result.updated}. Reactivated ${result.reactivated}. Closed ${result.closed}. Reconciled ${result.boards_reconciled} complete boards.${failedBoardMessage}`,
       );
       await loadJobs();
       await loadMarketSummary();
@@ -1309,9 +1351,13 @@ function App() {
       }
 
       const runs = await response.json();
-      const successfulRuns = runs.filter((run) => run.status === "success");
+      const completedRuns = runs.filter((run) =>
+        ["success", "partial_success"].includes(run.status),
+      );
+      const partialRuns = runs.filter((run) => run.status === "partial_success");
       const failedRuns = runs.filter((run) => run.status === "failed");
-      const totals = successfulRuns.reduce(
+      const runningRuns = runs.filter((run) => run.status === "running");
+      const totals = completedRuns.reduce(
         (current, run) => ({
           fetched: current.fetched + run.fetched,
           inserted: current.inserted + run.inserted,
@@ -1321,7 +1367,7 @@ function App() {
         { fetched: 0, inserted: 0, updated: 0, closed: 0 },
       );
       setStatus(
-        `Synced ${successfulRuns.length} sources. Fetched ${totals.fetched}. Inserted ${totals.inserted}. Updated ${totals.updated}. Closed ${totals.closed}.${failedRuns.length ? ` ${failedRuns.length} source failed; review Collection History.` : ""}`,
+        `Synced ${completedRuns.length} sources. Fetched ${totals.fetched}. Inserted ${totals.inserted}. Updated ${totals.updated}. Closed ${totals.closed}.${partialRuns.length ? ` ${partialRuns.length} source partially succeeded; review board details.` : ""}${failedRuns.length ? ` ${failedRuns.length} source failed; review Collection History.` : ""}${runningRuns.length ? ` ${runningRuns.length} source was already running and was skipped.` : ""}`,
       );
       await Promise.all([
         loadJobs(),
@@ -1376,6 +1422,16 @@ function App() {
     loadSkillGaps();
   }, []);
 
+  useEffect(() => {
+    if (activeView !== "data_sources") {
+      return undefined;
+    }
+
+    loadCollectionRuns();
+    const intervalId = window.setInterval(loadCollectionRuns, 15000);
+    return () => window.clearInterval(intervalId);
+  }, [activeView]);
+
   return (
     <main className="app-shell">
       <section className="topbar">
@@ -1405,7 +1461,8 @@ function App() {
             type="button"
             onClick={() => setActiveView(item.id)}
           >
-            {item.label}
+            <item.icon aria-hidden="true" />
+            <span>{item.label}</span>
           </button>
         ))}
       </nav>
@@ -1967,6 +2024,7 @@ function App() {
               >
                 <option value="greenhouse">Greenhouse</option>
                 <option value="lever">Lever</option>
+                <option value="ashby">Ashby</option>
               </select>
             </label>
             <label>
@@ -1974,7 +2032,13 @@ function App() {
               <input
                 value={boardTokens}
                 onChange={(event) => setBoardTokens(event.target.value)}
-                placeholder={collectorSource === "lever" ? "plaid" : "stripe, databricks"}
+                placeholder={
+                  collectorSource === "lever"
+                    ? "plaid"
+                    : collectorSource === "ashby"
+                      ? "ramp, sentilink"
+                      : "stripe, databricks"
+                }
               />
             </label>
 
@@ -1993,22 +2057,34 @@ function App() {
               className="primary-button"
               type="button"
               onClick={syncAllSources}
-              disabled={syncingAll || collecting}
+              disabled={syncingAll || collecting || hasRunningCollection}
             >
-              {syncingAll ? "Syncing All Sources" : "Sync All Sources"}
+              {syncingAll
+                ? "Syncing All Sources"
+                : hasRunningCollection
+                  ? "A Source Is Already Running"
+                  : "Sync All Sources"}
             </button>
             <button
               className="secondary-button"
               type="submit"
-              disabled={collecting || syncingAll}
+              disabled={
+                collecting
+                || syncingAll
+                || runningCollectionSources.has(collectorSource)
+              }
             >
-              {collecting ? "Collecting" : "Collect Selected Source"}
+              {collecting
+                ? "Collecting"
+                : runningCollectionSources.has(collectorSource)
+                  ? `${formatLabel(collectorSource)} Is Running`
+                  : "Collect Selected Source"}
             </button>
             <button
               className="secondary-button"
               type="button"
               onClick={deduplicateJobs}
-              disabled={deduplicating}
+              disabled={deduplicating || hasRunningCollection}
             >
               {deduplicating ? "Deduplicating" : "Deduplicate Jobs"}
             </button>
@@ -2082,7 +2158,32 @@ function App() {
                       <td>{formatDateTime(run.started_at)}</td>
                       <td>{formatDuration(run.started_at, run.completed_at)}</td>
                       <td>
-                        {run.boards_completed}/{run.boards_requested}
+                        {run.board_runs?.length ? (
+                          <details className="board-run-details">
+                            <summary>
+                              {run.boards_completed}/{run.boards_requested}
+                              {run.board_runs.some((board) => board.status === "failed")
+                                ? ` (${run.board_runs.filter((board) => board.status === "failed").length} failed)`
+                                : ""}
+                            </summary>
+                            <div className="board-run-list">
+                              {run.board_runs.map((board) => (
+                                <div className="board-run-item" key={board.id}>
+                                  <span className={`run-status ${board.status}`}>
+                                    {formatLabel(board.status)}
+                                  </span>
+                                  <strong>{board.company_name}</strong>
+                                  <span>{board.fetched} jobs</span>
+                                  {board.error_message && (
+                                    <span title={board.error_message}>{board.error_message}</span>
+                                  )}
+                                </div>
+                              ))}
+                            </div>
+                          </details>
+                        ) : (
+                          `${run.boards_completed}/${run.boards_requested}`
+                        )}
                       </td>
                       <td>{run.fetched}</td>
                       <td>{run.inserted}</td>
@@ -2493,7 +2594,11 @@ function App() {
           <div className="job-browser">
             <aside className="job-list-pane">
               <div className="job-list-toolbar">
-                <strong>{loadingJobs ? "Loading jobs" : `${jobs.length} jobs`}</strong>
+                <strong>
+                  {loadingJobs
+                    ? "Loading jobs"
+                    : `${jobPagination.total.toLocaleString()} jobs`}
+                </strong>
                 <span>{formatLabel(sortBy.replaceAll("_", " "))}</span>
               </div>
               <div className="job-card-list">
@@ -2581,6 +2686,45 @@ function App() {
                     No jobs match the current filters.
                   </div>
                 )}
+              </div>
+              <div className="job-pagination" aria-label="Job list pagination">
+                <button
+                  className="icon-button"
+                  type="button"
+                  title="Previous page"
+                  aria-label="Previous page"
+                  disabled={loadingJobs || jobPagination.page <= 1}
+                  onClick={() => loadJobs(jobPagination.page - 1)}
+                >
+                  <ChevronLeft aria-hidden="true" />
+                </button>
+                <span>
+                  Page {jobPagination.page} of {Math.max(jobPagination.total_pages, 1)}
+                </span>
+                <select
+                  aria-label="Jobs per page"
+                  value={jobPagination.page_size}
+                  disabled={loadingJobs}
+                  onChange={(event) => loadJobs(1, Number(event.target.value))}
+                >
+                  <option value="25">25 / page</option>
+                  <option value="50">50 / page</option>
+                  <option value="100">100 / page</option>
+                </select>
+                <button
+                  className="icon-button"
+                  type="button"
+                  title="Next page"
+                  aria-label="Next page"
+                  disabled={
+                    loadingJobs
+                    || jobPagination.total_pages === 0
+                    || jobPagination.page >= jobPagination.total_pages
+                  }
+                  onClick={() => loadJobs(jobPagination.page + 1)}
+                >
+                  <ChevronRight aria-hidden="true" />
+                </button>
               </div>
             </aside>
 

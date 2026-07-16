@@ -95,6 +95,33 @@ US_CITY_TO_STATE = {
     "washington dc": "District of Columbia",
 }
 
+GENERAL_ENGINEERING_TITLE_TERMS = (
+    "software engineer",
+    "backend engineer",
+    "frontend engineer",
+    "mobile engineer",
+    "security engineer",
+    "design engineer",
+    "infrastructure engineer",
+    "platform engineer",
+)
+
+ENGINEERING_TARGET_OVERRIDES = (
+    "data",
+    "analytics",
+    "machine learning",
+    "ml engineer",
+    "ai engineer",
+    "artificial intelligence",
+)
+
+NON_TARGET_FUNCTION_TITLE_TERMS = (
+    "it operations",
+    "learning and development",
+    "people operations",
+    "human resources",
+)
+
 
 @dataclass
 class CleanedJobFields:
@@ -435,7 +462,7 @@ def detect_entry_fit(
 
 def detect_role_category(title: str, description: Optional[str]) -> str:
     title_lower = title.lower()
-    combined = f"{title} {description or ''}".lower()
+    description_lower = (description or "").lower()
 
     if any(term in title_lower for term in ["data analyst", "business intelligence", "bi analyst"]):
         return "data_analytics"
@@ -443,8 +470,38 @@ def detect_role_category(title: str, description: Optional[str]) -> str:
     if any(term in title_lower for term in ["analytics engineer", "data engineer"]):
         return "data_engineering"
 
-    if any(term in title_lower for term in ["data scientist", "machine learning", "ml engineer", "ai engineer"]):
+    if any(
+        term in title_lower
+        for term in [
+            "data scientist",
+            "machine learning",
+            "ml engineer",
+            "ai engineer",
+            "applied scientist",
+        ]
+    ):
         return "ai_ml"
+
+    if any(
+        term in title_lower
+        for term in ["research engineer", "research scientist"]
+    ) and any(
+        term in description_lower
+        for term in [
+            "machine learning",
+            "artificial intelligence",
+            "large language model",
+            "llm",
+            "deep learning",
+            "generative ai",
+        ]
+    ):
+        return "ai_ml"
+
+    if any(term in title_lower for term in GENERAL_ENGINEERING_TITLE_TERMS) and not any(
+        term in title_lower for term in ENGINEERING_TARGET_OVERRIDES
+    ):
+        return "engineering"
 
     if any(term in title_lower for term in ["risk", "fraud", "aml", "compliance"]):
         return "risk_compliance"
@@ -455,13 +512,29 @@ def detect_role_category(title: str, description: Optional[str]) -> str:
     if any(term in title_lower for term in ["product analyst", "product manager", "product operations"]):
         return "product"
 
-    if any(term in title_lower for term in ["software engineer", "backend engineer", "frontend engineer"]):
+    if any(term in title_lower for term in GENERAL_ENGINEERING_TITLE_TERMS):
         return "engineering"
 
     if any(term in title_lower for term in ["account executive", "sales", "customer success"]):
         return "sales_gtm"
 
-    if any(term in combined for term in ["sql", "dashboard", "tableau", "power bi", "analytics"]):
+    if any(
+        term in title_lower
+        for term in [
+            "analyst",
+            "analytics",
+            "insights",
+            "decision scientist",
+            "operations research",
+            "business operations",
+            "strategy and operations",
+            "strategy & operations",
+            "quantitative",
+            "data operations",
+            "data quality",
+            "data governance",
+        ]
+    ):
         return "analytics_adjacent"
 
     return "unknown"
@@ -473,19 +546,17 @@ def calculate_target_relevance_score(
     role_category: str,
 ) -> int:
     title_lower = title.lower()
-    combined = f"{title} {description or ''}".lower()
+    description_lower = (description or "").lower()
     score = 0
 
-    target_categories = {
-        "data_analytics",
-        "analytics_adjacent",
-        "risk_compliance",
-        "ai_ml",
-        "data_engineering",
-        "product",
+    category_scores = {
+        "data_analytics": 35,
+        "risk_compliance": 35,
+        "ai_ml": 35,
+        "data_engineering": 35,
+        "analytics_adjacent": 25,
     }
-    if role_category in target_categories:
-        score += 30
+    score += category_scores.get(role_category, 0)
 
     title_positive_terms = {
         "data analyst": 30,
@@ -507,10 +578,19 @@ def calculate_target_relevance_score(
         "product analyst": 25,
         "analytics engineer": 24,
         "decision scientist": 28,
+        "research engineer": 15,
+        "research scientist": 20,
+        "applied scientist": 25,
+        "quantitative": 18,
+        "data operations": 20,
+        "data quality": 20,
+        "data governance": 20,
     }
+    title_signal_score = 0
     for term, weight in title_positive_terms.items():
         if term in title_lower:
-            score += weight
+            title_signal_score += weight
+    score += title_signal_score
 
     description_positive_terms = {
         "sql": 12,
@@ -535,9 +615,12 @@ def calculate_target_relevance_score(
         "data-driven": 8,
         "data driven": 8,
     }
-    for term, weight in description_positive_terms.items():
-        if term in combined:
-            score += weight
+    description_score = sum(
+        weight
+        for term, weight in description_positive_terms.items()
+        if term in description_lower
+    )
+    score += min(description_score, 30)
 
     negative_terms = {
         "account executive": 45,
@@ -554,6 +637,10 @@ def calculate_target_relevance_score(
         "frontend engineer": 25,
         "full stack": 22,
         "designer": 20,
+        "it operations": 35,
+        "learning and development": 40,
+        "people operations": 35,
+        "human resources": 35,
     }
     for term, penalty in negative_terms.items():
         if term in title_lower:
@@ -561,6 +648,29 @@ def calculate_target_relevance_score(
 
     if role_category in {"sales_gtm", "engineering", "finance_accounting"}:
         score -= 15
+
+    has_target_title_signal = (
+        role_category
+        in {
+            "data_analytics",
+            "analytics_adjacent",
+            "risk_compliance",
+            "ai_ml",
+            "data_engineering",
+        }
+        or title_signal_score > 0
+    )
+    if not has_target_title_signal:
+        score = min(score, 49)
+
+    is_non_target_engineering = any(
+        term in title_lower for term in GENERAL_ENGINEERING_TITLE_TERMS
+    ) and not any(term in title_lower for term in ENGINEERING_TARGET_OVERRIDES)
+    if is_non_target_engineering:
+        score = min(score, 49)
+
+    if any(term in title_lower for term in NON_TARGET_FUNCTION_TITLE_TERMS):
+        score = min(score, 49)
 
     return max(0, min(100, score))
 

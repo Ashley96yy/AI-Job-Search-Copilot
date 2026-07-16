@@ -2,9 +2,11 @@ from app.db.base import Base
 from app.db.session import engine
 from app.models import application  # noqa: F401
 from app.models import canonical_job  # noqa: F401
+from app.models import collection_board_run  # noqa: F401
 from app.models import collection_run  # noqa: F401
 from app.models import cover_letter  # noqa: F401
 from app.models import job_skill  # noqa: F401
+from app.models import job_fit_score  # noqa: F401
 from app.models import job_source_map  # noqa: F401
 from app.models import raw_job  # noqa: F401
 from app.models import resume_version  # noqa: F401
@@ -62,6 +64,10 @@ SQLITE_JOB_SKILL_COLUMNS = {
     "evidence_snippet": "TEXT",
 }
 
+SQLITE_COLLECTION_RUN_COLUMNS = {
+    "heartbeat_at": "DATETIME",
+}
+
 
 def init_db() -> None:
     Base.metadata.create_all(bind=engine)
@@ -71,6 +77,9 @@ def init_db() -> None:
         backfill_sqlite_job_lifecycle()
         backfill_sqlite_source_board_tokens()
         ensure_sqlite_lifecycle_indexes()
+        ensure_sqlite_collection_run_columns()
+        recover_sqlite_stale_collection_runs()
+        ensure_sqlite_collection_run_indexes()
         ensure_sqlite_job_skill_columns()
         ensure_sqlite_application_columns()
         migrate_sqlite_application_document_ids()
@@ -137,6 +146,77 @@ def ensure_sqlite_lifecycle_indexes() -> None:
         )
         connection.exec_driver_sql(
             "CREATE INDEX IF NOT EXISTS ix_raw_jobs_last_seen_at ON raw_jobs (last_seen_at)"
+        )
+
+
+def ensure_sqlite_collection_run_columns() -> None:
+    with engine.begin() as connection:
+        existing_columns = {
+            row[1]
+            for row in connection.exec_driver_sql(
+                "PRAGMA table_info(collection_runs)"
+            )
+        }
+
+        for column_name, column_type in SQLITE_COLLECTION_RUN_COLUMNS.items():
+            if column_name not in existing_columns:
+                connection.exec_driver_sql(
+                    f"ALTER TABLE collection_runs ADD COLUMN {column_name} {column_type}"
+                )
+
+        connection.exec_driver_sql(
+            """
+            UPDATE collection_runs
+            SET heartbeat_at = COALESCE(heartbeat_at, started_at)
+            WHERE heartbeat_at IS NULL
+            """
+        )
+
+
+def recover_sqlite_stale_collection_runs() -> None:
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            """
+            UPDATE collection_runs
+            SET status = 'failed',
+                completed_at = CURRENT_TIMESTAMP,
+                error_message = COALESCE(
+                    error_message,
+                    'Interrupted or no heartbeat received for more than 10 minutes.'
+                )
+            WHERE status = 'running'
+              AND heartbeat_at < DATETIME('now', '-10 minutes')
+            """
+        )
+        connection.exec_driver_sql(
+            """
+            UPDATE collection_runs
+            SET status = 'failed',
+                completed_at = CURRENT_TIMESTAMP,
+                error_message = COALESCE(
+                    error_message,
+                    'Superseded by another running collection for this source.'
+                )
+            WHERE status = 'running'
+              AND id NOT IN (
+                SELECT MAX(id)
+                FROM collection_runs
+                WHERE status = 'running'
+                GROUP BY source
+              )
+            """
+        )
+
+
+def ensure_sqlite_collection_run_indexes() -> None:
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_collection_runs_heartbeat_at "
+            "ON collection_runs (heartbeat_at)"
+        )
+        connection.exec_driver_sql(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_collection_runs_running_source "
+            "ON collection_runs (source) WHERE status = 'running'"
         )
 
 

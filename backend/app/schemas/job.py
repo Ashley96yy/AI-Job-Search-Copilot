@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime
+from math import ceil
 from typing import Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -77,6 +78,30 @@ class JobSkillRead(BaseModel):
 class JobDetail(JobRead):
     description: Optional[str] = None
     skills: list[JobSkillRead] = Field(default_factory=list)
+
+
+class PaginatedJobs(BaseModel):
+    items: list[JobRead]
+    total: int
+    page: int
+    page_size: int
+    total_pages: int
+
+    @classmethod
+    def create(
+        cls,
+        items: list[JobRead],
+        total: int,
+        page: int,
+        page_size: int,
+    ) -> "PaginatedJobs":
+        return cls(
+            items=items,
+            total=total,
+            page=page,
+            page_size=page_size,
+            total_pages=ceil(total / page_size) if total else 0,
+        )
 
 
 class ManualJobCreate(BaseModel):

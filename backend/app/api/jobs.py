@@ -3,14 +3,15 @@ from hashlib import sha256
 from typing import Optional
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import delete, distinct, func, or_, select
-from sqlalchemy.orm import Session
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import and_, delete, distinct, func, or_, select
+from sqlalchemy.orm import Session, selectinload
 
 from app.db.session import get_db
 from app.models.application import Application
 from app.models.collection_run import CollectionRun
 from app.models.cover_letter import CoverLetter
+from app.models.job_fit_score import JobFitScore
 from app.models.job_skill import JobSkill
 from app.models.job_source_map import JobSourceMap
 from app.models.raw_job import RawJob
@@ -30,15 +31,24 @@ from app.schemas.job import (
     JobSkillRead,
     ManualJobCreate,
     MarketSummary,
+    PaginatedJobs,
 )
 from app.services.collectors.company_registry import TARGET_COMPANIES
 from app.services.collectors.collector_runner import COLLECTORS
-from app.services.collection_runs import execute_collection_run
+from app.services.collection_runs import (
+    CollectionRunConflict,
+    execute_collection_run,
+    recover_stale_collection_runs,
+)
 from app.services.deduplication import count_canonical_jobs, deduplicate_jobs
 from app.services.fit_score import (
-    calculate_fit_score,
-    get_job_skills_by_job_id,
+    FitScoreResult,
     get_latest_profile,
+)
+from app.services.fit_score_cache import (
+    SCORING_VERSION,
+    get_cached_fit_scores,
+    profile_signature,
 )
 from app.services.job_cleaning import apply_cleaned_fields, clean_existing_raw_jobs
 from app.services.skill_extraction import extract_skills_for_all_jobs, extract_skills_for_job
@@ -150,10 +160,8 @@ def calculate_week_over_week_change(
 
 def build_job_read(
     job: RawJob,
-    skills: list[JobSkill],
-    profile,
+    fit_score: Optional[FitScoreResult],
 ) -> JobRead:
-    fit_score = calculate_fit_score(job, skills, profile)
     updates = {
         "posting_age_days": calculate_posting_age_days(job.date_posted),
         "freshness_bucket": calculate_freshness_bucket(job.date_posted),
@@ -210,33 +218,6 @@ def normalize_match_level(value: str) -> str:
     return levels.get(cleaned, value)
 
 
-def apply_fit_filters(
-    jobs: list[JobRead],
-    match_level: Optional[str],
-    min_fit_score: Optional[int],
-    has_fit_score: Optional[bool],
-) -> list[JobRead]:
-    filtered_jobs = jobs
-
-    if has_fit_score is True:
-        filtered_jobs = [job for job in filtered_jobs if job.fit_score is not None]
-
-    if match_level:
-        expected_match_level = normalize_match_level(match_level)
-        filtered_jobs = [
-            job for job in filtered_jobs if job.match_level == expected_match_level
-        ]
-
-    if min_fit_score is not None:
-        filtered_jobs = [
-            job
-            for job in filtered_jobs
-            if job.fit_score is not None and job.fit_score >= min_fit_score
-        ]
-
-    return filtered_jobs
-
-
 def normalize_freshness(value: str) -> str:
     cleaned = value.strip().replace("_", " ").replace("-", " ").lower()
     buckets = {
@@ -248,6 +229,36 @@ def normalize_freshness(value: str) -> str:
         "unknown": "Unknown",
     }
     return buckets.get(cleaned, value)
+
+
+def apply_freshness_filter(statement, freshness: Optional[str]):
+    if not freshness:
+        return statement
+
+    expected = normalize_freshness(freshness)
+    now = datetime.utcnow()
+    fresh_cutoff = now - timedelta(days=30)
+    recent_cutoff = now - timedelta(days=90)
+    aging_cutoff = now - timedelta(days=180)
+
+    if expected == "Fresh":
+        return statement.where(RawJob.date_posted >= fresh_cutoff)
+    if expected == "Recent":
+        return statement.where(
+            RawJob.date_posted >= recent_cutoff,
+            RawJob.date_posted < fresh_cutoff,
+        )
+    if expected == "Aging":
+        return statement.where(
+            RawJob.date_posted >= aging_cutoff,
+            RawJob.date_posted < recent_cutoff,
+        )
+    if expected == "Stale / Evergreen":
+        return statement.where(RawJob.date_posted < aging_cutoff)
+    if expected == "Unknown":
+        return statement.where(RawJob.date_posted.is_(None))
+
+    return statement
 
 
 @router.get("/market-summary", response_model=MarketSummary)
@@ -329,7 +340,7 @@ def get_market_summary(
     )
 
 
-@router.get("", response_model=list[JobRead])
+@router.get("", response_model=PaginatedJobs)
 def list_jobs(
     source: Optional[str] = None,
     company: Optional[str] = None,
@@ -352,9 +363,12 @@ def list_jobs(
     min_fit_score: Optional[int] = None,
     has_fit_score: Optional[bool] = None,
     active_only: bool = True,
-    limit: int = 100,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=25, ge=1, le=100),
+    limit: Optional[int] = Query(default=None, ge=1, le=100),
     db: Session = Depends(get_db),
-) -> list[JobRead]:
+) -> PaginatedJobs:
+    effective_page_size = limit or page_size
     statement = select(RawJob).where(
         or_(
             RawJob.owner_user_id.is_(None),
@@ -432,59 +446,81 @@ def list_jobs(
             )
         )
 
-    uses_fit_controls = (
+    statement = apply_freshness_filter(statement, freshness)
+    profile = get_latest_profile(db)
+    uses_fit_cache_query = (
         sort_by == "fit_score"
-        or sort_by == "target_relevance"
-        or sort_by == "entry_fit"
         or bool(match_level)
         or min_fit_score is not None
         or has_fit_score is True
     )
-    statement = statement.order_by(RawJob.date_collected.desc())
-    if not uses_fit_controls:
-        statement = statement.limit(limit)
-
-    jobs = list(db.scalars(statement).all())
-    profile = get_latest_profile(db)
-    skills_by_job_id = get_job_skills_by_job_id(db, [job.id for job in jobs])
-    job_reads = [
-        build_job_read(job, skills_by_job_id.get(job.id, []), profile)
-        for job in jobs
-    ]
-
-    job_reads = apply_fit_filters(
-        jobs=job_reads,
-        match_level=match_level,
-        min_fit_score=min_fit_score,
-        has_fit_score=has_fit_score,
+    fit_filter_requested = (
+        bool(match_level)
+        or min_fit_score is not None
+        or has_fit_score is True
     )
 
-    if freshness:
-        expected_freshness = normalize_freshness(freshness)
-        job_reads = [
-            job for job in job_reads if job.freshness_bucket == expected_freshness
-        ]
+    if fit_filter_requested and not profile:
+        return PaginatedJobs.create([], 0, page, effective_page_size)
 
-    if sort_by == "fit_score":
-        job_reads = sorted(
-            job_reads,
-            key=lambda job: job.fit_score if job.fit_score is not None else -1,
-            reverse=True,
+    if profile and uses_fit_cache_query:
+        candidate_jobs = list(db.scalars(statement).all())
+        get_cached_fit_scores(db, candidate_jobs, profile)
+        statement = statement.join(
+            JobFitScore,
+            and_(
+                JobFitScore.raw_job_id == RawJob.id,
+                JobFitScore.user_id == profile.user_id,
+                JobFitScore.profile_id == profile.id,
+                JobFitScore.profile_signature == profile_signature(profile),
+                JobFitScore.scoring_version == SCORING_VERSION,
+            ),
+        )
+
+        if match_level:
+            statement = statement.where(
+                JobFitScore.match_level == normalize_match_level(match_level)
+            )
+        if min_fit_score is not None:
+            statement = statement.where(JobFitScore.fit_score >= min_fit_score)
+
+    total = db.scalar(
+        select(func.count()).select_from(statement.order_by(None).subquery())
+    ) or 0
+
+    if sort_by == "fit_score" and profile:
+        statement = statement.order_by(
+            JobFitScore.fit_score.desc(),
+            RawJob.date_collected.desc(),
         )
     elif sort_by == "target_relevance":
-        job_reads = sorted(
-            job_reads,
-            key=lambda job: job.target_relevance_score,
-            reverse=True,
+        statement = statement.order_by(
+            RawJob.target_relevance_score.desc(),
+            RawJob.date_collected.desc(),
         )
     elif sort_by == "entry_fit":
-        job_reads = sorted(
-            job_reads,
-            key=lambda job: job.entry_fit_score,
-            reverse=True,
+        statement = statement.order_by(
+            RawJob.entry_fit_score.desc(),
+            RawJob.date_collected.desc(),
         )
+    else:
+        statement = statement.order_by(RawJob.date_collected.desc())
 
-    return job_reads[:limit]
+    statement = statement.offset((page - 1) * effective_page_size).limit(
+        effective_page_size
+    )
+    jobs = list(db.scalars(statement).all())
+    fit_scores = get_cached_fit_scores(db, jobs, profile)
+    job_reads = [
+        build_job_read(job, fit_scores.get(job.id))
+        for job in jobs
+    ]
+    return PaginatedJobs.create(
+        job_reads,
+        total,
+        page,
+        effective_page_size,
+    )
 
 
 @router.post("/manual", response_model=JobDetail)
@@ -595,10 +631,12 @@ def list_collection_runs(
     limit: int = 20,
     db: Session = Depends(get_db),
 ) -> list[CollectionRun]:
+    recover_stale_collection_runs(db)
     safe_limit = max(1, min(limit, 100))
     return list(
         db.scalars(
             select(CollectionRun)
+            .options(selectinload(CollectionRun.board_runs))
             .order_by(CollectionRun.started_at.desc(), CollectionRun.id.desc())
             .limit(safe_limit)
         ).all()
@@ -615,16 +653,18 @@ async def sync_all_job_sources(
     runs: list[CollectionRun] = []
 
     for source in sources:
-        runs.append(
-            await execute_collection_run(
+        try:
+            run = await execute_collection_run(
                 db,
                 source=source,
                 max_jobs_per_board=request.max_jobs_per_board,
                 trigger="sync_all",
             )
-        )
+        except CollectionRunConflict as exc:
+            run = exc.active_run
+        runs.append(run)
 
-    if any(run.status == "success" for run in runs):
+    if any(run.status in {"success", "partial_success"} for run in runs):
         deduplicate_jobs(db)
 
     return runs
@@ -647,7 +687,7 @@ def get_job(job_id: int, db: Session = Depends(get_db)) -> JobDetail:
         ).all()
     )
     profile = get_latest_profile(db)
-    fit_score = calculate_fit_score(job, skills, profile)
+    fit_score = get_cached_fit_scores(db, [job], profile).get(job.id)
     updates = {
         "skills": [JobSkillRead.model_validate(skill) for skill in skills],
         "posting_age_days": calculate_posting_age_days(job.date_posted),
@@ -689,14 +729,24 @@ async def collect_jobs(
             detail=f"Unsupported collector source: {request.source}",
         )
 
-    run = await execute_collection_run(
-        db,
-        source=request.source,
-        board_tokens=request.board_tokens,
-        keywords=request.keywords,
-        max_jobs_per_board=request.max_jobs_per_board,
-        trigger="manual",
-    )
+    try:
+        run = await execute_collection_run(
+            db,
+            source=request.source,
+            board_tokens=request.board_tokens,
+            keywords=request.keywords,
+            max_jobs_per_board=request.max_jobs_per_board,
+            trigger="manual",
+        )
+    except CollectionRunConflict as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": str(exc),
+                "active_run_id": exc.active_run.id,
+                "source": exc.active_run.source,
+            },
+        ) from exc
     if run.status == "failed":
         raise HTTPException(
             status_code=502,
@@ -705,6 +755,7 @@ async def collect_jobs(
 
     return CollectJobsResponse(
         source=run.source,
+        status=run.status,
         boards_requested=run.boards_requested,
         fetched=run.fetched,
         matched=run.fetched,
@@ -714,6 +765,11 @@ async def collect_jobs(
         boards_reconciled=run.boards_reconciled,
         missing_observations=run.missing_observations,
         closed=run.closed,
+        failed_boards=[
+            board_run.board_token
+            for board_run in run.board_runs
+            if board_run.status == "failed"
+        ],
     )
 
 
