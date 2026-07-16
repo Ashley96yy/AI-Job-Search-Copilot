@@ -38,6 +38,7 @@ class JobPaginationAndFitCacheTest(unittest.TestCase):
         self.db.add(self.profile)
 
         now = datetime.utcnow()
+        self.now = now
         for index, skill in enumerate(("Python", "SQL", "Tableau"), start=1):
             job = RawJob(
                 source="test",
@@ -102,6 +103,10 @@ class JobPaginationAndFitCacheTest(unittest.TestCase):
         self.assertEqual(payload["page"], 1)
         self.assertEqual(payload["page_size"], 2)
         self.assertEqual(payload["total_pages"], 2)
+        self.assertIn(
+            payload["items"][0]["application_recommendation"],
+            {"apply", "tailor_first", "stretch", "skip"},
+        )
 
         second_page = self.client.get("/jobs?page=2&page_size=2").json()
         self.assertEqual(len(second_page["items"]), 1)
@@ -150,6 +155,78 @@ class JobPaginationAndFitCacheTest(unittest.TestCase):
         self.assertEqual(response.json()["total"], 3)
         with Session(self.engine) as db:
             self.assertEqual(db.scalar(select(func.count(JobFitScore.id))), 3)
+
+    def test_viewed_and_hidden_states_filter_jobs_per_user(self) -> None:
+        viewed_response = self.client.put("/jobs/1/state", json={"viewed": True})
+        self.assertEqual(viewed_response.status_code, 200)
+        self.assertTrue(viewed_response.json()["is_viewed"])
+
+        unseen = self.client.get("/jobs?unseen_only=true&page_size=10").json()
+        self.assertEqual(unseen["total"], 2)
+        self.assertNotIn(1, [job["id"] for job in unseen["items"]])
+
+        hidden_response = self.client.put("/jobs/2/state", json={"hidden": True})
+        self.assertEqual(hidden_response.status_code, 200)
+        self.assertTrue(hidden_response.json()["is_hidden"])
+        self.assertTrue(hidden_response.json()["is_viewed"])
+
+        visible = self.client.get("/jobs?page_size=10").json()
+        self.assertEqual(visible["total"], 2)
+        self.assertNotIn(2, [job["id"] for job in visible["items"]])
+
+        hidden = self.client.get("/jobs?hidden_only=true&page_size=10").json()
+        self.assertEqual(hidden["total"], 1)
+        self.assertEqual(hidden["items"][0]["id"], 2)
+        self.assertTrue(hidden["items"][0]["is_hidden"])
+
+        detail = self.client.get("/jobs/2").json()
+        self.assertTrue(detail["is_hidden"])
+        self.assertIsNotNone(detail["hidden_at"])
+
+        restored = self.client.put("/jobs/2/state", json={"hidden": False})
+        self.assertEqual(restored.status_code, 200)
+        self.assertFalse(restored.json()["is_hidden"])
+        self.assertEqual(self.client.get("/jobs?page_size=10").json()["total"], 3)
+
+    def test_new_since_uses_first_seen_time(self) -> None:
+        old_job = RawJob(
+            source="test",
+            external_job_id="old-job",
+            company="Example",
+            title="Old Data Analyst",
+            date_collected=self.now,
+            first_seen_at=self.now - timedelta(days=10),
+            last_seen_at=self.now,
+            is_active=True,
+        )
+        self.db.add(old_job)
+        self.db.commit()
+
+        cutoff = (self.now - timedelta(days=1)).isoformat()
+        response = self.client.get(
+            f"/jobs?new_since={cutoff}&page_size=10"
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["total"], 3)
+        self.assertNotIn(old_job.id, [job["id"] for job in payload["items"]])
+
+    def test_discovery_session_remembers_previous_visit(self) -> None:
+        first = self.client.post("/jobs/discovery-session")
+        self.assertEqual(first.status_code, 200)
+        self.assertIsNone(first.json()["previous_visit_at"])
+
+        second = self.client.post("/jobs/discovery-session")
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(
+            second.json()["previous_visit_at"],
+            first.json()["session_started_at"],
+        )
+
+    def test_job_state_update_requires_a_change(self) -> None:
+        response = self.client.put("/jobs/1/state", json={})
+        self.assertEqual(response.status_code, 400)
 
 
 if __name__ == "__main__":

@@ -1,8 +1,40 @@
 # AI Job Search Copilot
 
-Human-in-the-loop job search assistant for entry-level data, risk, finance analytics, and AI analytics candidates.
+Human-in-the-loop job intelligence and application workflow for entry-level Data,
+Risk, and AI Analytics candidates.
 
-The project collects compliant public job postings, stores raw job data, cleans and deduplicates roles, extracts requirements, analyzes market trends, compares jobs with a candidate profile, and helps prepare application materials without auto-submitting applications.
+The project helps early-career candidates identify genuinely accessible roles,
+understand transferable fit, and avoid misleading "entry-level" postings. It collects
+compliant public job postings, preserves raw source data, cleans and deduplicates roles,
+extracts requirements, compares jobs with a candidate profile, and supports application
+preparation without auto-submitting applications.
+
+## Who This Is For
+
+The primary user is a student, new graduate, or career-transition candidate targeting:
+
+- Data Analytics and Business Intelligence
+- Risk, Fraud, Compliance, AML, and Finance Analytics
+- Data Engineering roles with realistic entry-level requirements
+- Applied AI / ML and AI Analytics roles
+
+These candidates face a specific discovery problem: job titles are inconsistent,
+"entry-level" roles often request several years of experience, and relevant experience
+may come from transferable projects or adjacent business domains rather than an identical
+previous job title.
+
+## Core Decisions
+
+For each job, the system is designed to answer three questions:
+
+1. Is this role genuinely accessible to an entry-level candidate?
+2. Is it relevant to the candidate's Data, Risk, or AI target path, even when the title
+   does not contain an exact keyword?
+3. Should the candidate apply now, tailor their materials first, treat it as a stretch,
+   or skip it because the experience requirement is too high?
+
+The Fit Score is therefore an explainable decision aid, not a prediction of whether the
+candidate will receive an interview or offer.
 
 ## Project Structure
 
@@ -209,6 +241,40 @@ Fit Scores are cached in `job_fit_scores` by user, profile contents, job
 contents, and scoring version. Repeated list/detail requests reuse the cached
 result; changing profile skills, target roles/locations, or job content causes
 the score to be recalculated.
+
+Each job also receives an explainable application recommendation:
+
+- `Apply`: entry-eligible, Fit Score of at least 65, aligned domain/interest, and no
+  detected required skill gaps.
+- `Tailor First`: relevant role with a workable fit, but the resume or domain evidence
+  should be strengthened before applying.
+- `Stretch`: relevant and entry-eligible, but currently below the tailoring threshold.
+- `Skip`: explicitly requires 3+ years, is classified as senior/lead, is otherwise
+  career-ineligible, or falls outside the saved target path.
+
+These recommendations are deterministic and traceable to the stored job/profile fields;
+they are not generated application outcomes or guarantees.
+
+### Job Discovery State
+
+The Jobs page keeps discovery state per user without changing shared job data:
+
+- `Visible` excludes jobs the user has hidden.
+- `New` uses `first_seen_at` to show jobs collected since the previous Jobs session.
+- `Unseen` shows jobs whose detail has never been opened.
+- `Hidden` lets the user review and restore dismissed jobs.
+
+Opening a job marks it viewed. Hiding a job removes it from discovery but does not
+delete it or remove an existing Tracker record. The same behavior is available by API:
+
+```bash
+curl -X POST http://127.0.0.1:8000/jobs/discovery-session
+curl "http://127.0.0.1:8000/jobs?unseen_only=true"
+curl "http://127.0.0.1:8000/jobs?hidden_only=true"
+curl -X PUT http://127.0.0.1:8000/jobs/47/state \
+  -H "Content-Type: application/json" \
+  -d '{"viewed": true, "hidden": true}'
+```
 
 Jobs are active-only by default. Include closed jobs when reviewing history:
 

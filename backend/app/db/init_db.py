@@ -11,6 +11,7 @@ from app.models import job_source_map  # noqa: F401
 from app.models import raw_job  # noqa: F401
 from app.models import resume_version  # noqa: F401
 from app.models import user  # noqa: F401
+from app.models import user_job_state  # noqa: F401
 from app.models import user_profile  # noqa: F401
 from app.services.collectors.company_registry import TARGET_COMPANIES
 
@@ -68,11 +69,16 @@ SQLITE_COLLECTION_RUN_COLUMNS = {
     "heartbeat_at": "DATETIME",
 }
 
+SQLITE_USER_COLUMNS = {
+    "jobs_last_visited_at": "DATETIME",
+}
+
 
 def init_db() -> None:
     Base.metadata.create_all(bind=engine)
     if engine.url.get_backend_name() == "sqlite":
         ensure_default_user()
+        ensure_sqlite_user_columns()
         ensure_sqlite_raw_job_columns()
         backfill_sqlite_job_lifecycle()
         backfill_sqlite_source_board_tokens()
@@ -229,6 +235,19 @@ def ensure_default_user() -> None:
             WHERE NOT EXISTS (SELECT 1 FROM users WHERE id = 1)
             """
         )
+
+
+def ensure_sqlite_user_columns() -> None:
+    with engine.begin() as connection:
+        existing_columns = {
+            row[1] for row in connection.exec_driver_sql("PRAGMA table_info(users)")
+        }
+
+        for column_name, column_type in SQLITE_USER_COLUMNS.items():
+            if column_name not in existing_columns:
+                connection.exec_driver_sql(
+                    f"ALTER TABLE users ADD COLUMN {column_name} {column_type}"
+                )
 
 
 def ensure_sqlite_job_skill_columns() -> None:

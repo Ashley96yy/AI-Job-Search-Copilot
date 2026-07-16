@@ -84,6 +84,94 @@ class FitScoreResult:
     fit_notes: list[str] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class ApplicationRecommendation:
+    key: str
+    label: str
+    reason: str
+
+
+def recommend_application_action(
+    job: RawJob,
+    fit_score: Optional[FitScoreResult],
+) -> ApplicationRecommendation:
+    if (
+        not job.career_eligible
+        or job.seniority in {"senior", "lead"}
+        or (job.required_experience_years or 0) >= 3
+    ):
+        return ApplicationRecommendation(
+            key="skip",
+            label="Skip",
+            reason=(
+                job.career_eligibility_reason
+                or job.entry_fit_reasons
+                or "The role is outside the selected entry-level experience range."
+            ),
+        )
+
+    if job.target_relevance_score < 50:
+        return ApplicationRecommendation(
+            key="skip",
+            label="Skip",
+            reason="The role is outside the saved Data, Risk, and AI target path.",
+        )
+
+    if fit_score is None:
+        return ApplicationRecommendation(
+            key="tailor_first",
+            label="Tailor First",
+            reason="Add or update a candidate profile before making an application decision.",
+        )
+
+    missing_required_count = len(fit_score.missing_required_skills)
+    dimension_scores = {
+        str(item.get("key")): int(item.get("score", 0))
+        for item in fit_score.fit_breakdown
+    }
+    has_target_alignment = (
+        dimension_scores.get("domain", 0) >= 7
+        and dimension_scores.get("interest", 0) >= 3
+    )
+    if (
+        fit_score.fit_score >= 65
+        and missing_required_count == 0
+        and has_target_alignment
+    ):
+        return ApplicationRecommendation(
+            key="apply",
+            label="Apply",
+            reason=(
+                f"Fit Score {fit_score.fit_score} with no detected required skill gaps."
+            ),
+        )
+
+    if fit_score.fit_score >= 50:
+        gap_text = (
+            f" Address {missing_required_count} required skill gap"
+            f"{'s' if missing_required_count != 1 else ''}."
+            if missing_required_count
+            else (
+                " Tailor the resume to the strongest matching evidence and confirm "
+                "domain alignment."
+            )
+        )
+        return ApplicationRecommendation(
+            key="tailor_first",
+            label="Tailor First",
+            reason=f"Fit Score {fit_score.fit_score}.{gap_text}",
+        )
+
+    return ApplicationRecommendation(
+        key="stretch",
+        label="Stretch",
+        reason=(
+            f"The role is relevant and entry-eligible, but the current Fit Score is "
+            f"{fit_score.fit_score}."
+        ),
+    )
+
+
 def get_latest_profile(db: Session) -> Optional[UserProfile]:
     return db.scalar(
         select(UserProfile)

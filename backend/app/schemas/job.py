@@ -54,6 +54,13 @@ class JobRead(BaseModel):
     career_eligibility_reason: Optional[str] = None
     role_category: Optional[str] = None
     target_relevance_score: int = 0
+    is_viewed: bool = False
+    is_hidden: bool = False
+    viewed_at: Optional[datetime] = None
+    hidden_at: Optional[datetime] = None
+    application_recommendation: str = "tailor_first"
+    application_recommendation_label: str = "Tailor First"
+    application_recommendation_reason: Optional[str] = None
     fit_score: Optional[int] = None
     match_level: Optional[str] = None
     matched_skills: list[str] = Field(default_factory=list)
@@ -102,6 +109,25 @@ class PaginatedJobs(BaseModel):
             page_size=page_size,
             total_pages=ceil(total / page_size) if total else 0,
         )
+
+
+class JobStateUpdate(BaseModel):
+    viewed: Optional[bool] = None
+    hidden: Optional[bool] = None
+
+
+class JobStateRead(BaseModel):
+    raw_job_id: int
+    is_viewed: bool
+    is_hidden: bool
+    viewed_at: Optional[datetime] = None
+    hidden_at: Optional[datetime] = None
+
+
+class JobDiscoverySession(BaseModel):
+    previous_visit_at: Optional[datetime] = None
+    new_since: datetime
+    session_started_at: datetime
 
 
 class ManualJobCreate(BaseModel):

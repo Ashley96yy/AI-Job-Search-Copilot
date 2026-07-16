@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   BriefcaseBusiness,
   ChartColumn,
@@ -6,12 +6,17 @@ import {
   ChevronRight,
   ClipboardCheck,
   Database,
+  Eye,
+  EyeOff,
   FileText,
   LayoutDashboard,
+  SlidersHorizontal,
   UserRound,
+  X,
 } from "lucide-react";
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:8000";
+const JOB_DISCOVERY_SESSION_KEY = "job-search-copilot:new-jobs-since";
 
 const NAV_ITEMS = [
   { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
@@ -87,6 +92,14 @@ function formatDate(value) {
     day: "numeric",
     year: "numeric",
   }).format(new Date(value));
+}
+
+function isNewSince(job, cutoff) {
+  if (!job.first_seen_at || !cutoff) {
+    return false;
+  }
+
+  return new Date(job.first_seen_at).getTime() >= new Date(cutoff).getTime();
 }
 
 function formatDateTime(value) {
@@ -188,6 +201,7 @@ function DistributionList({ title, items }) {
 }
 
 function App() {
+  const discoverySessionStarted = useRef(false);
   const [activeView, setActiveView] = useState("jobs");
   const [collectorSource, setCollectorSource] = useState("greenhouse");
   const [boardTokens, setBoardTokens] = useState("");
@@ -206,12 +220,17 @@ function App() {
   const [dashboardRoleCategory, setDashboardRoleCategory] = useState("");
   const [search, setSearch] = useState("");
   const [titleSearch, setTitleSearch] = useState("");
-  const [sortBy, setSortBy] = useState("date_collected");
+  const [sortBy, setSortBy] = useState("first_seen");
   const [matchLevel, setMatchLevel] = useState("");
   const [minFitScore, setMinFitScore] = useState("");
   const [hasFitScore, setHasFitScore] = useState(false);
   const [maxPostingAgeDays, setMaxPostingAgeDays] = useState("180");
   const [freshness, setFreshness] = useState("");
+  const [showAdvancedFilters, setShowAdvancedFilters] = useState(false);
+  const [discoveryFilter, setDiscoveryFilter] = useState("visible");
+  const [newJobsSince, setNewJobsSince] = useState(
+    () => window.sessionStorage.getItem(JOB_DISCOVERY_SESSION_KEY),
+  );
   const [sources, setSources] = useState([]);
   const [collectionRuns, setCollectionRuns] = useState([]);
   const [jobs, setJobs] = useState([]);
@@ -284,6 +303,7 @@ function App() {
   const [savingManualSkill, setSavingManualSkill] = useState("");
   const [savingApplication, setSavingApplication] = useState(false);
   const [savingQuickTrackJobId, setSavingQuickTrackJobId] = useState(null);
+  const [savingJobStateId, setSavingJobStateId] = useState(null);
   const [savingManualJob, setSavingManualJob] = useState(false);
   const [deletingManualJob, setDeletingManualJob] = useState(false);
   const [savingResumeVersion, setSavingResumeVersion] = useState(false);
@@ -349,9 +369,80 @@ function App() {
     return new Set(trackedApplications.map((application) => application.raw_job_id));
   }, [trackedApplications]);
 
-  async function loadJobs(requestedPage = 1, requestedPageSize = jobPagination.page_size) {
+  const activeJobFilters = useMemo(() => [
+    company && { id: "company", label: `Company: ${company}` },
+    location && { id: "location", label: `Location: ${location}` },
+    jobState && { id: "state", label: `State: ${jobState}` },
+    workMode && { id: "work_mode", label: formatLabel(workMode) },
+    seniority && { id: "seniority", label: formatLabel(seniority) },
+    entryFitLevel && { id: "entry_fit", label: formatLabel(entryFitLevel) },
+    roleCategory && { id: "role_category", label: formatLabel(roleCategory) },
+    search && { id: "search", label: `Text: ${search}` },
+    titleSearch && { id: "title", label: `Title: ${titleSearch}` },
+    matchLevel && { id: "match_level", label: matchLevel },
+    minFitScore && { id: "min_fit", label: `Fit ${minFitScore}+` },
+    maxPostingAgeDays && { id: "posting_age", label: `Posted ${maxPostingAgeDays}d` },
+    freshness && { id: "freshness", label: freshness },
+    usOnly && { id: "us_only", label: "US only" },
+    targetRelevantOnly && { id: "target_relevant", label: "Target relevant" },
+    careerEligibleOnly && { id: "career_eligible", label: "0-2 years" },
+    activeOnly && { id: "active_only", label: "Active" },
+    hasFitScore && { id: "has_fit", label: "Has Fit Score" },
+  ].filter(Boolean), [
+    activeOnly,
+    careerEligibleOnly,
+    company,
+    entryFitLevel,
+    freshness,
+    hasFitScore,
+    jobState,
+    location,
+    matchLevel,
+    maxPostingAgeDays,
+    minFitScore,
+    roleCategory,
+    search,
+    seniority,
+    targetRelevantOnly,
+    titleSearch,
+    usOnly,
+    workMode,
+  ]);
+
+  function clearJobFilter(filterId) {
+    const clearActions = {
+      active_only: () => setActiveOnly(false),
+      career_eligible: () => setCareerEligibleOnly(false),
+      company: () => setCompany(""),
+      entry_fit: () => setEntryFitLevel(""),
+      freshness: () => setFreshness(""),
+      has_fit: () => setHasFitScore(false),
+      location: () => setLocation(""),
+      match_level: () => setMatchLevel(""),
+      min_fit: () => setMinFitScore(""),
+      posting_age: () => setMaxPostingAgeDays(""),
+      role_category: () => setRoleCategory(""),
+      search: () => setSearch(""),
+      seniority: () => setSeniority(""),
+      state: () => setJobState(""),
+      target_relevant: () => setTargetRelevantOnly(false),
+      title: () => setTitleSearch(""),
+      us_only: () => setUsOnly(false),
+      work_mode: () => setWorkMode(""),
+    };
+    clearActions[filterId]?.();
+  }
+
+  async function loadJobs(
+    requestedPage = 1,
+    requestedPageSize = jobPagination.page_size,
+    options = {},
+  ) {
     setLoadingJobs(true);
     setError("");
+
+    const effectiveDiscoveryFilter = options.discoveryFilter ?? discoveryFilter;
+    const effectiveNewJobsSince = options.newJobsSince ?? newJobsSince;
 
     const params = new URLSearchParams();
     if (company.trim()) params.set("company", company.trim());
@@ -373,6 +464,11 @@ function App() {
     if (hasFitScore) params.set("has_fit_score", "true");
     if (maxPostingAgeDays) params.set("max_posting_age_days", maxPostingAgeDays);
     if (freshness) params.set("freshness", freshness);
+    if (effectiveDiscoveryFilter === "unseen") params.set("unseen_only", "true");
+    if (effectiveDiscoveryFilter === "hidden") params.set("hidden_only", "true");
+    if (effectiveDiscoveryFilter === "new" && effectiveNewJobsSince) {
+      params.set("new_since", effectiveNewJobsSince);
+    }
     params.set("page", String(requestedPage));
     params.set("page_size", String(requestedPageSize));
 
@@ -399,6 +495,50 @@ function App() {
     }
   }
 
+  async function startJobDiscoverySession() {
+    try {
+      const response = await fetch(`${API_BASE_URL}/jobs/discovery-session`, {
+        method: "POST",
+      });
+
+      if (!response.ok) {
+        throw new Error(`POST /jobs/discovery-session failed with ${response.status}`);
+      }
+
+      const session = await response.json();
+      setNewJobsSince(session.new_since);
+      window.sessionStorage.setItem(JOB_DISCOVERY_SESSION_KEY, session.new_since);
+      return session.new_since;
+    } catch (err) {
+      setError(err.message);
+      return null;
+    }
+  }
+
+  async function selectDiscoveryFilter(nextFilter) {
+    setDiscoveryFilter(nextFilter);
+    await loadJobs(1, jobPagination.page_size, {
+      discoveryFilter: nextFilter,
+    });
+  }
+
+  async function writeJobState(jobId, updates) {
+    const response = await fetch(`${API_BASE_URL}/jobs/${jobId}/state`, {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(updates),
+    });
+
+    if (!response.ok) {
+      const detail = await response.text();
+      throw new Error(`PUT /jobs/${jobId}/state failed with ${response.status}: ${detail}`);
+    }
+
+    return response.json();
+  }
+
   async function loadJobDetail(jobId) {
     setLoadingJobDetail(true);
     setError("");
@@ -411,7 +551,17 @@ function App() {
       }
 
       const job = await response.json();
-      setSelectedJob(job);
+      let nextJob = job;
+
+      if (!job.is_viewed) {
+        const state = await writeJobState(job.id, { viewed: true });
+        nextJob = { ...job, ...state };
+        setJobs((current) => current.map((item) => (
+          item.id === job.id ? { ...item, ...state } : item
+        )));
+      }
+
+      setSelectedJob(nextJob);
       setResumeSuggestions(null);
       setSuggestionResumeVersionId("");
       setCoverLetterDraft(null);
@@ -423,6 +573,33 @@ function App() {
       setError(err.message);
     } finally {
       setLoadingJobDetail(false);
+    }
+  }
+
+  async function toggleJobHidden(job, event) {
+    event?.stopPropagation();
+    setSavingJobStateId(job.id);
+    setError("");
+    setStatus("");
+
+    try {
+      const willHide = !job.is_hidden;
+      await writeJobState(job.id, { hidden: willHide });
+      if (selectedJob?.id === job.id) {
+        setSelectedJob(null);
+      }
+
+      const currentPage = (
+        jobs.length === 1 && jobPagination.page > 1
+          ? jobPagination.page - 1
+          : jobPagination.page
+      );
+      await loadJobs(currentPage);
+      setStatus(willHide ? "Job hidden from discovery." : "Job restored to discovery.");
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setSavingJobStateId(null);
     }
   }
 
@@ -1415,6 +1592,10 @@ function App() {
     loadCollectionRuns();
     loadMarketSummary();
     loadJobs();
+    if (!newJobsSince && !discoverySessionStarted.current) {
+      discoverySessionStarted.current = true;
+      startJobDiscoverySession();
+    }
     loadTrackedApplications();
     loadResumeVersions();
     loadCoverLetters();
@@ -2389,8 +2570,55 @@ function App() {
             </form>
           )}
 
+          <div className="job-discovery-bar">
+            <div className="job-discovery-tabs" role="tablist" aria-label="Job discovery views">
+              {[
+                { value: "visible", label: "Visible" },
+                { value: "new", label: "New" },
+                { value: "unseen", label: "Unseen" },
+                { value: "hidden", label: "Hidden" },
+              ].map((option) => (
+                <button
+                  className={discoveryFilter === option.value ? "active" : ""}
+                  type="button"
+                  role="tab"
+                  aria-selected={discoveryFilter === option.value}
+                  disabled={loadingJobs || (option.value === "new" && !newJobsSince)}
+                  key={option.value}
+                  onClick={() => selectDiscoveryFilter(option.value)}
+                >
+                  {option.label}
+                </button>
+              ))}
+            </div>
+            <span>
+              {newJobsSince
+                ? `New since ${formatDate(newJobsSince)}`
+                : "Starting discovery session"}
+            </span>
+          </div>
+
+          <div className="active-filter-bar" aria-label="Current job filters">
+            <span>Filters</span>
+            <div>
+              {activeJobFilters.map((filter) => (
+                <button
+                  type="button"
+                  className="filter-chip"
+                  key={filter.id}
+                  title={`Remove ${filter.label}`}
+                  onClick={() => clearJobFilter(filter.id)}
+                >
+                  {filter.label}
+                  <X aria-hidden="true" />
+                </button>
+              ))}
+              {!activeJobFilters.length && <span className="no-active-filters">None</span>}
+            </div>
+          </div>
+
           <div className="filters">
-            <label>
+            <label className={showAdvancedFilters ? "advanced-filter visible" : "advanced-filter"}>
               Company
               <input
                 value={company}
@@ -2406,7 +2634,7 @@ function App() {
                 placeholder="US, New York, Remote"
               />
             </label>
-            <label>
+            <label className={showAdvancedFilters ? "advanced-filter visible" : "advanced-filter"}>
               State
               <input
                 value={jobState}
@@ -2437,7 +2665,7 @@ function App() {
                 <option value="unknown">Unknown</option>
               </select>
             </label>
-            <label>
+            <label className={showAdvancedFilters ? "advanced-filter visible" : "advanced-filter"}>
               Entry fit
               <select
                 value={entryFitLevel}
@@ -2468,7 +2696,7 @@ function App() {
                 <option value="unknown">Unknown</option>
               </select>
             </label>
-            <label>
+            <label className={showAdvancedFilters ? "advanced-filter visible" : "advanced-filter"}>
               Full text
               <input
                 value={search}
@@ -2487,13 +2715,14 @@ function App() {
             <label>
               Sort
               <select value={sortBy} onChange={(event) => setSortBy(event.target.value)}>
-                <option value="date_collected">Newest collected</option>
+                <option value="first_seen">Newest discovered</option>
+                <option value="date_collected">Most recently collected</option>
                 <option value="target_relevance">Target relevance high to low</option>
                 <option value="fit_score">Fit score high to low</option>
                 <option value="entry_fit">Entry fit high to low</option>
               </select>
             </label>
-            <label>
+            <label className={showAdvancedFilters ? "advanced-filter visible" : "advanced-filter"}>
               Match level
               <select value={matchLevel} onChange={(event) => setMatchLevel(event.target.value)}>
                 <option value="">Any</option>
@@ -2503,7 +2732,7 @@ function App() {
                 <option value="Low Match">Low Match</option>
               </select>
             </label>
-            <label>
+            <label className={showAdvancedFilters ? "advanced-filter visible" : "advanced-filter"}>
               Min fit score
               <input
                 min="0"
@@ -2527,7 +2756,7 @@ function App() {
                 <option value="">All active postings</option>
               </select>
             </label>
-            <label>
+            <label className={showAdvancedFilters ? "advanced-filter visible" : "advanced-filter"}>
               Freshness
               <select value={freshness} onChange={(event) => setFreshness(event.target.value)}>
                 <option value="">Any</option>
@@ -2538,7 +2767,7 @@ function App() {
                 <option value="Unknown">Unknown</option>
               </select>
             </label>
-            <label className="checkbox-label">
+            <label className={`checkbox-label advanced-filter ${showAdvancedFilters ? "visible" : ""}`}>
               <input
                 checked={usOnly}
                 type="checkbox"
@@ -2562,7 +2791,7 @@ function App() {
               />
               0-2 years required
             </label>
-            <label className="checkbox-label">
+            <label className={`checkbox-label advanced-filter ${showAdvancedFilters ? "visible" : ""}`}>
               <input
                 checked={activeOnly}
                 type="checkbox"
@@ -2570,7 +2799,7 @@ function App() {
               />
               Active only
             </label>
-            <label className="checkbox-label">
+            <label className={`checkbox-label advanced-filter ${showAdvancedFilters ? "visible" : ""}`}>
               <input
                 checked={hasFitScore}
                 type="checkbox"
@@ -2579,7 +2808,17 @@ function App() {
               Has fit score
             </label>
             <button
-              className="secondary-button"
+              className="secondary-button more-filters-button"
+              type="button"
+              aria-expanded={showAdvancedFilters}
+              onClick={() => setShowAdvancedFilters((current) => !current)}
+            >
+              <SlidersHorizontal aria-hidden="true" />
+              {showAdvancedFilters ? "Fewer Filters" : "More Filters"}
+            </button>
+            <button
+              className="primary-button apply-filters-button"
+              type="button"
               onClick={() => {
                 loadJobs();
                 loadMarketSummary();
@@ -2605,10 +2844,12 @@ function App() {
                 {jobs.map((job) => {
                   const isTracked = trackedJobIds.has(job.id);
                   const isSavingQuickTrack = savingQuickTrackJobId === job.id;
+                  const isSavingState = savingJobStateId === job.id;
+                  const isNew = isNewSince(job, newJobsSince);
 
                   return (
                     <article
-                      className={`job-card ${selectedJob?.id === job.id ? "selected" : ""}`}
+                      className={`job-card ${selectedJob?.id === job.id ? "selected" : ""} ${job.is_viewed ? "viewed" : "unseen"}`}
                       key={`${job.source}-${job.external_job_id}`}
                       role="button"
                       tabIndex={0}
@@ -2629,12 +2870,15 @@ function App() {
                           {(job.company || "?").slice(0, 1).toUpperCase()}
                         </div>
                         <div>
-                          <p>{job.company || "Unknown company"}</p>
+                          <div className="job-card-heading-meta">
+                            <p>{job.company || "Unknown company"}</p>
+                            {!job.is_viewed && <span className="discovery-badge unseen">Unseen</span>}
+                            {isNew && <span className="discovery-badge new">New</span>}
+                          </div>
                           <h3>{job.title}</h3>
                         </div>
                       </div>
                       <div className="job-card-tags">
-                        <span>{formatLabel(job.entry_fit_level)}</span>
                         <span>{formatLabel(job.work_mode)}</span>
                         <span>
                           {job.required_experience_years == null
@@ -2642,6 +2886,12 @@ function App() {
                             : `${job.required_experience_years} yrs required`}
                         </span>
                         <span>{job.state || job.country || "Location unknown"}</span>
+                      </div>
+                      <div className="job-recommendation-row">
+                        <span className={`recommendation-badge ${job.application_recommendation}`}>
+                          {job.application_recommendation_label || "Tailor First"}
+                        </span>
+                        <p>{job.application_recommendation_reason}</p>
                       </div>
                       <div className="job-card-scores">
                         <div>
@@ -2666,17 +2916,31 @@ function App() {
                           </span>
                           {job.is_user_added && <span>{formatLabel(job.source)}</span>}
                         </div>
-                        <button
-                          className="save-job-button"
-                          type="button"
-                          disabled={isTracked || isSavingQuickTrack}
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            saveJobToTracker(job);
-                          }}
-                        >
-                          {isSavingQuickTrack ? "Saving" : isTracked ? "Saved" : "Save"}
-                        </button>
+                        <div className="job-card-actions">
+                          <button
+                            className="job-state-button"
+                            type="button"
+                            title={job.is_hidden ? "Restore job" : "Hide job"}
+                            aria-label={job.is_hidden ? "Restore job" : "Hide job"}
+                            disabled={isSavingState}
+                            onClick={(event) => toggleJobHidden(job, event)}
+                          >
+                            {job.is_hidden
+                              ? <Eye aria-hidden="true" />
+                              : <EyeOff aria-hidden="true" />}
+                          </button>
+                          <button
+                            className="save-job-button"
+                            type="button"
+                            disabled={isTracked || isSavingQuickTrack}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              saveJobToTracker(job);
+                            }}
+                          >
+                            {isSavingQuickTrack ? "Saving" : isTracked ? "Saved" : "Save"}
+                          </button>
+                        </div>
                       </div>
                     </article>
                   );
@@ -2744,6 +3008,18 @@ function App() {
                       <h3>{selectedJob.title}</h3>
                     </div>
                     <div className="detail-actions">
+                      <button
+                        className="icon-button"
+                        type="button"
+                        title={selectedJob.is_hidden ? "Restore job" : "Hide job"}
+                        aria-label={selectedJob.is_hidden ? "Restore job" : "Hide job"}
+                        disabled={savingJobStateId === selectedJob.id}
+                        onClick={(event) => toggleJobHidden(selectedJob, event)}
+                      >
+                        {selectedJob.is_hidden
+                          ? <Eye aria-hidden="true" />
+                          : <EyeOff aria-hidden="true" />}
+                      </button>
                       {selectedJob.job_url && (
                         <a className="primary-link-button" href={selectedJob.job_url} target="_blank" rel="noreferrer">
                           Open
@@ -2789,6 +3065,12 @@ function App() {
                     </span>
                     <span>{formatLabel(selectedJob.role_category)}</span>
                   </div>
+
+                  <section className={`application-recommendation ${selectedJob.application_recommendation}`}>
+                    <span>Recommended action</span>
+                    <strong>{selectedJob.application_recommendation_label || "Tailor First"}</strong>
+                    <p>{selectedJob.application_recommendation_reason}</p>
+                  </section>
 
                   <div className="detail-score-grid">
                     <div className="detail-score-card">

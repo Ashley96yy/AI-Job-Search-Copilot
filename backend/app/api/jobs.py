@@ -1,4 +1,4 @@
-from datetime import datetime, time, timedelta
+from datetime import datetime, time, timedelta, timezone
 from hashlib import sha256
 from typing import Optional
 from uuid import uuid4
@@ -15,6 +15,8 @@ from app.models.job_fit_score import JobFitScore
 from app.models.job_skill import JobSkill
 from app.models.job_source_map import JobSourceMap
 from app.models.raw_job import RawJob
+from app.models.user import User
+from app.models.user_job_state import UserJobState
 from app.schemas.collector import (
     CollectionRunRead,
     CollectJobsRequest,
@@ -27,8 +29,11 @@ from app.schemas.job import (
     DistributionItem,
     FitScoreDimension,
     JobDetail,
+    JobDiscoverySession,
     JobRead,
     JobSkillRead,
+    JobStateRead,
+    JobStateUpdate,
     ManualJobCreate,
     MarketSummary,
     PaginatedJobs,
@@ -44,6 +49,7 @@ from app.services.deduplication import count_canonical_jobs, deduplicate_jobs
 from app.services.fit_score import (
     FitScoreResult,
     get_latest_profile,
+    recommend_application_action,
 )
 from app.services.fit_score_cache import (
     SCORING_VERSION,
@@ -161,10 +167,19 @@ def calculate_week_over_week_change(
 def build_job_read(
     job: RawJob,
     fit_score: Optional[FitScoreResult],
+    user_state: Optional[UserJobState] = None,
 ) -> JobRead:
+    recommendation = recommend_application_action(job, fit_score)
     updates = {
         "posting_age_days": calculate_posting_age_days(job.date_posted),
         "freshness_bucket": calculate_freshness_bucket(job.date_posted),
+        "is_viewed": user_state is not None and user_state.viewed_at is not None,
+        "is_hidden": user_state is not None and user_state.hidden_at is not None,
+        "viewed_at": user_state.viewed_at if user_state else None,
+        "hidden_at": user_state.hidden_at if user_state else None,
+        "application_recommendation": recommendation.key,
+        "application_recommendation_label": recommendation.label,
+        "application_recommendation_reason": recommendation.reason,
     }
 
     if fit_score:
@@ -185,6 +200,38 @@ def build_job_read(
         })
 
     return JobRead.model_validate(job).model_copy(update=updates)
+
+
+def get_user_job_states(
+    db: Session,
+    job_ids: list[int],
+) -> dict[int, UserJobState]:
+    if not job_ids:
+        return {}
+
+    states = db.scalars(
+        select(UserJobState).where(
+            UserJobState.user_id == DEFAULT_USER_ID,
+            UserJobState.raw_job_id.in_(job_ids),
+        )
+    ).all()
+    return {state.raw_job_id: state for state in states}
+
+
+def build_job_state_read(job_id: int, state: Optional[UserJobState]) -> JobStateRead:
+    return JobStateRead(
+        raw_job_id=job_id,
+        is_viewed=state is not None and state.viewed_at is not None,
+        is_hidden=state is not None and state.hidden_at is not None,
+        viewed_at=state.viewed_at if state else None,
+        hidden_at=state.hidden_at if state else None,
+    )
+
+
+def normalize_utc_datetime(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value
+    return value.astimezone(timezone.utc).replace(tzinfo=None)
 
 
 def calculate_posting_age_days(date_posted: Optional[datetime]) -> Optional[int]:
@@ -358,10 +405,13 @@ def list_jobs(
     role_category: Optional[str] = None,
     search: Optional[str] = None,
     title_search: Optional[str] = None,
-    sort_by: str = "date_collected",
+    sort_by: str = "first_seen",
     match_level: Optional[str] = None,
     min_fit_score: Optional[int] = None,
     has_fit_score: Optional[bool] = None,
+    unseen_only: bool = False,
+    hidden_only: bool = False,
+    new_since: Optional[datetime] = None,
     active_only: bool = True,
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=25, ge=1, le=100),
@@ -369,12 +419,33 @@ def list_jobs(
     db: Session = Depends(get_db),
 ) -> PaginatedJobs:
     effective_page_size = limit or page_size
-    statement = select(RawJob).where(
-        or_(
-            RawJob.owner_user_id.is_(None),
-            RawJob.owner_user_id == DEFAULT_USER_ID,
+    state_join = and_(
+        UserJobState.raw_job_id == RawJob.id,
+        UserJobState.user_id == DEFAULT_USER_ID,
+    )
+    statement = (
+        select(RawJob)
+        .outerjoin(UserJobState, state_join)
+        .where(
+            or_(
+                RawJob.owner_user_id.is_(None),
+                RawJob.owner_user_id == DEFAULT_USER_ID,
+            )
         )
     )
+
+    if hidden_only:
+        statement = statement.where(UserJobState.hidden_at.is_not(None))
+    else:
+        statement = statement.where(UserJobState.hidden_at.is_(None))
+
+    if unseen_only:
+        statement = statement.where(UserJobState.viewed_at.is_(None))
+
+    if new_since:
+        statement = statement.where(
+            RawJob.first_seen_at >= normalize_utc_datetime(new_since)
+        )
 
     if active_only:
         statement = statement.where(RawJob.is_active.is_(True))
@@ -503,16 +574,22 @@ def list_jobs(
             RawJob.entry_fit_score.desc(),
             RawJob.date_collected.desc(),
         )
-    else:
+    elif sort_by == "date_collected":
         statement = statement.order_by(RawJob.date_collected.desc())
+    else:
+        statement = statement.order_by(
+            RawJob.first_seen_at.desc(),
+            RawJob.date_collected.desc(),
+        )
 
     statement = statement.offset((page - 1) * effective_page_size).limit(
         effective_page_size
     )
     jobs = list(db.scalars(statement).all())
     fit_scores = get_cached_fit_scores(db, jobs, profile)
+    user_states = get_user_job_states(db, [job.id for job in jobs])
     job_reads = [
-        build_job_read(job, fit_scores.get(job.id))
+        build_job_read(job, fit_scores.get(job.id), user_states.get(job.id))
         for job in jobs
     ]
     return PaginatedJobs.create(
@@ -608,6 +685,9 @@ def delete_manual_job(
     )
     db.execute(delete(JobSkill).where(JobSkill.raw_job_id == job_id))
     db.execute(delete(JobSourceMap).where(JobSourceMap.raw_job_id == job_id))
+    db.execute(
+        delete(UserJobState).where(UserJobState.raw_job_id == job_id)
+    )
     db.delete(job)
     db.commit()
 
@@ -670,6 +750,71 @@ async def sync_all_job_sources(
     return runs
 
 
+@router.post("/discovery-session", response_model=JobDiscoverySession)
+def start_job_discovery_session(
+    db: Session = Depends(get_db),
+) -> JobDiscoverySession:
+    user = db.get(User, DEFAULT_USER_ID)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    session_started_at = datetime.utcnow()
+    previous_visit_at = user.jobs_last_visited_at
+    new_since = previous_visit_at or (session_started_at - timedelta(days=7))
+    user.jobs_last_visited_at = session_started_at
+    db.commit()
+
+    return JobDiscoverySession(
+        previous_visit_at=previous_visit_at,
+        new_since=new_since,
+        session_started_at=session_started_at,
+    )
+
+
+@router.put("/{job_id}/state", response_model=JobStateRead)
+def update_job_state(
+    job_id: int,
+    payload: JobStateUpdate,
+    db: Session = Depends(get_db),
+) -> JobStateRead:
+    if payload.viewed is None and payload.hidden is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Provide viewed or hidden state.",
+        )
+
+    job = db.get(RawJob, job_id)
+    if not job or (
+        job.owner_user_id is not None and job.owner_user_id != DEFAULT_USER_ID
+    ):
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    state = db.scalar(
+        select(UserJobState).where(
+            UserJobState.user_id == DEFAULT_USER_ID,
+            UserJobState.raw_job_id == job_id,
+        )
+    )
+    if not state:
+        state = UserJobState(
+            user_id=DEFAULT_USER_ID,
+            raw_job_id=job_id,
+        )
+        db.add(state)
+
+    now = datetime.utcnow()
+    if payload.viewed is not None:
+        state.viewed_at = now if payload.viewed else None
+    if payload.hidden is not None:
+        state.hidden_at = now if payload.hidden else None
+        if payload.hidden and state.viewed_at is None:
+            state.viewed_at = now
+
+    db.commit()
+    db.refresh(state)
+    return build_job_state_read(job_id, state)
+
+
 @router.get("/{job_id}", response_model=JobDetail)
 def get_job(job_id: int, db: Session = Depends(get_db)) -> JobDetail:
     job = db.get(RawJob, job_id)
@@ -688,10 +833,24 @@ def get_job(job_id: int, db: Session = Depends(get_db)) -> JobDetail:
     )
     profile = get_latest_profile(db)
     fit_score = get_cached_fit_scores(db, [job], profile).get(job.id)
+    recommendation = recommend_application_action(job, fit_score)
+    user_state = db.scalar(
+        select(UserJobState).where(
+            UserJobState.user_id == DEFAULT_USER_ID,
+            UserJobState.raw_job_id == job.id,
+        )
+    )
     updates = {
         "skills": [JobSkillRead.model_validate(skill) for skill in skills],
         "posting_age_days": calculate_posting_age_days(job.date_posted),
         "freshness_bucket": calculate_freshness_bucket(job.date_posted),
+        "is_viewed": user_state is not None and user_state.viewed_at is not None,
+        "is_hidden": user_state is not None and user_state.hidden_at is not None,
+        "viewed_at": user_state.viewed_at if user_state else None,
+        "hidden_at": user_state.hidden_at if user_state else None,
+        "application_recommendation": recommendation.key,
+        "application_recommendation_label": recommendation.label,
+        "application_recommendation_reason": recommendation.reason,
     }
 
     if fit_score:
